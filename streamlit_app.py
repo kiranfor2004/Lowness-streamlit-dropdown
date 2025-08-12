@@ -2,10 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from statsmodels.nonparametric.smoothers_lowess import lowess
-from io import StringIO
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import re
 
 # -------------------------------
 # Page Config
@@ -23,26 +21,17 @@ st.markdown("<p style='text-align: center;'>TradingView-style interactive charts
 # -------------------------------
 st.markdown("---")
 
-# Add file upload option and refresh button
-col1, col2, col3 = st.columns([2, 2, 1])
+col1, col2 = st.columns([3, 1])
 
 with col1:
     data_source = st.selectbox(
         "📈 Select Data Source",
         options=["Futures", "Index"],
-        index=0,  # Default to Futures
+        index=0,
         help="Choose between Futures.csv or Index.csv data"
     )
 
 with col2:
-    uploaded_file = st.file_uploader(
-        "Or upload a CSV file",
-        type=['csv'],
-        help="Upload your own CSV file with OHLCV data"
-    )
-
-with col3:
-    st.write("")  # Empty space for alignment
     if st.button("🔄 Refresh", help="Clear cache and reload data"):
         st.cache_data.clear()
         st.rerun()
@@ -52,168 +41,77 @@ with col3:
 # -------------------------------
 @st.cache_data
 def load_data(source, _cache_key=None):
-    filename = f"{source.lower()}.csv"  # futures.csv or index.csv
+    filename = f"{source.lower()}.csv"
     
     try:
-        # First try to read as a standard CSV
+        # Read the CSV file
         df = pd.read_csv(filename, encoding='latin1', low_memory=False)
         
-        # Auto-detect column structure based on number of columns
+        # Check if we have enough columns
         num_cols = len(df.columns)
-        
-        if num_cols >= 6:  # Minimum OHLCV + date/time
-            # Check if first row contains headers or data
-            first_row_is_data = True
-            try:
-                # Try to convert first few values to numbers
-                for i in range(2, min(6, num_cols)):
-                    pd.to_numeric(df.iloc[0, i])
-            except:
-                first_row_is_data = False
-            
-            if first_row_is_data and not any(col.lower() in ['date', 'time', 'open', 'high', 'low', 'close'] for col in df.columns):
-                # No headers detected, assign column names based on structure
-                if num_cols == 7:  # Index format: date, time, open, high, low, close, volume
-                    df.columns = ['date', 'time', 'open', 'high', 'low', 'close', 'Volume']
-                elif num_cols == 11:  # Futures format with VIX
-                    df.columns = [
-                        'date', 'time', 'open', 'high', 'low', 'close', 'Volume',
-                        'vix_open', 'vix_high', 'vix_low', 'vix_close'
-                    ]
-                elif num_cols >= 6:  # Generic OHLCV
-                    base_cols = ['date', 'time', 'open', 'high', 'low', 'close']
-                    if num_cols > 6:
-                        base_cols.extend([f'col_{i}' for i in range(7, num_cols + 1)])
-                    df.columns = base_cols[:num_cols]
-            
-            # Standardize column names (handle case variations)
-            df.columns = [col.lower().strip() for col in df.columns]
-            
-        else:
+        if num_cols < 6:
             st.error(f"❌ '{filename}' has insufficient columns (found {num_cols}, need at least 6)")
             return None
-            
+        
+        # Assign column names based on structure
+        if num_cols == 7:  # Index format
+            df.columns = ['date', 'time', 'open', 'high', 'low', 'close', 'volume']
+        elif num_cols == 11:  # Futures format with VIX
+            df.columns = [
+                'date', 'time', 'open', 'high', 'low', 'close', 'volume',
+                'vix_open', 'vix_high', 'vix_low', 'vix_close'
+            ]
+        else:
+            # Generic format - assume first 7 columns are standard
+            df.columns = ['date', 'time', 'open', 'high', 'low', 'close', 'volume'] + [f'col_{i}' for i in range(8, num_cols + 1)]
+        
+        # Create datetime column
+        try:
+            df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str), 
+                                          format='%d-%m-%Y %H:%M:%S', errors='coerce')
+        except:
+            try:
+                df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str), 
+                                              infer_datetime_format=True, errors='coerce')
+            except:
+                st.error(f"❌ Could not parse date/time in '{filename}'")
+                return None
+        
+        # Convert numeric columns
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Clean data
+        df = df.dropna(subset=['close', 'datetime'])
+        
+        if df.empty:
+            st.error(f"❌ No valid data found after cleaning '{filename}'")
+            return None
+        
+        return df
+        
     except FileNotFoundError:
-        st.error(f"❌ '{filename}' not found. Please ensure the file exists in the same directory.")
+        st.error(f"❌ **'{filename}' not found.**")
+        st.info(f"""
+        **To fix this issue:**
+        1. Make sure you have a file named `{filename}` in the same directory as this script
+        2. Check that the filename matches exactly (case-sensitive)
+        3. Verify the file is a valid CSV format
+        
+        **Expected file structure:**
+        - For **Futures**: 11 columns (date, time, open, high, low, close, volume, vix_open, vix_high, vix_low, vix_close)
+        - For **Index**: 7 columns (date, time, open, high, low, close, volume)
+        """)
         return None
     except Exception as e:
         st.error(f"❌ Error reading '{filename}': {str(e)}")
         return None
 
-    # Clean and convert data
-    try:
-        # Handle different date/time combinations
-        if 'date' in df.columns and 'time' in df.columns:
-            # Try different date formats
-            date_formats = ['%d-%m-%Y', '%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y']
-            time_formats = ['%H:%M:%S', '%H:%M']
-            
-            datetime_created = False
-            for date_fmt in date_formats:
-                for time_fmt in time_formats:
-                    try:
-                        df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str), 
-                                                      format=f'{date_fmt} {time_fmt}')
-                        datetime_created = True
-                        break
-                    except:
-                        continue
-                if datetime_created:
-                    break
-            
-            if not datetime_created:
-                # Last resort: let pandas auto-detect
-                try:
-                    df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str), 
-                                                  infer_datetime_format=True, errors='coerce')
-                except:
-                    st.error(f"❌ Could not parse date/time columns in '{filename}'")
-                    return None
-        
-        elif 'datetime' in df.columns:
-            df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
-        
-        else:
-            st.error(f"❌ No date/time columns found in '{filename}'")
-            return None
-        
-        # Convert numeric columns (handle different column structures)
-        required_cols = ['open', 'high', 'low', 'close']
-        optional_cols = ['volume', 'vix_open', 'vix_high', 'vix_low', 'vix_close']
-        
-        # Check for required columns
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            st.error(f"❌ Missing required columns in '{filename}': {missing_cols}")
-            return None
-        
-        # Convert all numeric columns
-        all_numeric_cols = required_cols + [col for col in optional_cols if col in df.columns]
-        for col in all_numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        # Add volume column if missing (set to 0)
-        if 'volume' not in df.columns:
-            df['volume'] = 0
-            st.warning(f"⚠️ No volume data found in '{filename}', using zeros")
-        
-        # Clean data
-        df.dropna(subset=['close', 'datetime'], inplace=True)
-        
-        if df.empty:
-            st.error(f"❌ No valid data found after cleaning '{filename}'.")
-            return None
-            
-        return df
-        
-    except Exception as e:
-        st.error(f"❌ Error processing data from '{filename}': {str(e)}")
-        return None
-
-# Load data based on selected source or uploaded file
-if uploaded_file is not None:
-    try:
-        df = pd.read_csv(uploaded_file, encoding='latin1', low_memory=False)
-        data_source_display = f"Uploaded: {uploaded_file.name}"
-        
-        # Standardize column names
-        df.columns = [col.lower().strip() for col in df.columns]
-        
-        # Try to standardize column names
-        if len(df.columns) >= 6:  # Minimum required columns
-            # Handle datetime
-            if 'date' in df.columns and 'time' in df.columns:
-                df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str), 
-                                              errors='coerce', infer_datetime_format=True)
-            elif 'datetime' in df.columns:
-                df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
-            
-            # Convert numeric columns
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            # Add volume if missing
-            if 'volume' not in df.columns:
-                df['volume'] = 0
-            
-            df.dropna(subset=['close', 'datetime'], inplace=True)
-            
-            if df.empty:
-                st.error("❌ No valid data found in uploaded file.")
-                st.stop()
-        else:
-            st.error(f"❌ Uploaded file must have at least 6 columns (found {len(df.columns)})")
-            st.stop()
-            
-    except Exception as e:
-        st.error(f"❌ Error reading uploaded file: {str(e)}")
-        st.stop()
-else:
-    # Use a cache key that includes the data source to force reload when changing
-    cache_key = f"{data_source}_{hash(data_source)}"
-    df = load_data(data_source, _cache_key=cache_key)
-    data_source_display = data_source
+# Load data based on selected source
+cache_key = f"{data_source}_{hash(data_source)}"
+df = load_data(data_source, _cache_key=cache_key)
 
 if df is None:
     st.stop()
@@ -247,7 +145,7 @@ elif data_source == "Index":
 else:
     icon = "📁"
     
-st.info(f"{icon} **Currently showing: {data_source_display}** | {len(df):,} records")
+st.info(f"{icon} **Currently showing: {data_source}** | {len(df):,} records")
 
 # -------------------------------
 # Date Filter
@@ -310,7 +208,7 @@ fig = make_subplots(
     shared_xaxes=True,
     vertical_spacing=0.02,
     row_heights=[0.65, 0.15, 0.2],
-    subplot_titles=(f"{data_source_display} - Price & LOWESS Channel ({from_date} to {to_date})", "Volume", "RSI (14)")
+    subplot_titles=(f"{data_source} - Price & LOWESS Channel ({from_date} to {to_date})", "Volume", "RSI (14)")
 )
 
 # --- Price Chart ---
@@ -377,7 +275,7 @@ fig.add_hline(y=50, line_dash="dot", line_color="#888888", annotation_text="Midl
 # --- Layout ---
 fig.update_layout(
     title=dict(
-        text=f"<b>{data_source_display} Trading Analysis Dashboard</b>",
+        text=f"<b>{data_source} Trading Analysis Dashboard</b>",
         x=0.5,
         font=dict(size=16)
     ),
@@ -417,7 +315,7 @@ st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True})
 # Summary Statistics
 # -------------------------------
 st.markdown("---")
-st.markdown(f"### 📈 {data_source_display} Summary Statistics")
+st.markdown(f"### 📈 {data_source} Summary Statistics")
 
 col1, col2, col3, col4 = st.columns(4)
 

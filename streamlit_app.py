@@ -41,62 +41,37 @@ with col2:
 # -------------------------------
 @st.cache_data
 def load_data(source, _cache_key=None):
-    filename = f"{source.lower()}.csv"
+    # Try different filename variations
+    possible_filenames = [
+        f"{source.lower()}.csv",        # futures.csv, index.csv
+        f"{source}.csv",                # Futures.csv, Index.csv
+        f"{source.upper()}.csv",        # FUTURES.csv, INDEX.csv
+        f"{source.capitalize()}.csv"    # Futures.csv, Index.csv
+    ]
     
-    try:
-        # Read the CSV file
-        df = pd.read_csv(filename, encoding='latin1', low_memory=False)
-        
-        # Check if we have enough columns
-        num_cols = len(df.columns)
-        if num_cols < 6:
-            st.error(f"❌ '{filename}' has insufficient columns (found {num_cols}, need at least 6)")
-            return None
-        
-        # Assign column names based on structure
-        if num_cols == 7:  # Index format
-            df.columns = ['date', 'time', 'open', 'high', 'low', 'close', 'volume']
-        elif num_cols == 11:  # Futures format with VIX
-            df.columns = [
-                'date', 'time', 'open', 'high', 'low', 'close', 'volume',
-                'vix_open', 'vix_high', 'vix_low', 'vix_close'
-            ]
-        else:
-            # Generic format - assume first 7 columns are standard
-            df.columns = ['date', 'time', 'open', 'high', 'low', 'close', 'volume'] + [f'col_{i}' for i in range(8, num_cols + 1)]
-        
-        # Create datetime column
+    df = None
+    filename_used = None
+    
+    for filename in possible_filenames:
         try:
-            df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str), 
-                                          format='%d-%m-%Y %H:%M:%S', errors='coerce')
-        except:
-            try:
-                df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str), 
-                                              infer_datetime_format=True, errors='coerce')
-            except:
-                st.error(f"❌ Could not parse date/time in '{filename}'")
-                return None
-        
-        # Convert numeric columns
-        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        # Clean data
-        df = df.dropna(subset=['close', 'datetime'])
-        
-        if df.empty:
-            st.error(f"❌ No valid data found after cleaning '{filename}'")
+            # Read the CSV file
+            df = pd.read_csv(filename, encoding='latin1', low_memory=False)
+            filename_used = filename
+            break
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            st.error(f"❌ Error reading '{filename}': {str(e)}")
             return None
-        
-        return df
-        
-    except FileNotFoundError:
-        st.error(f"❌ **'{filename}' not found.**")
+    
+    if df is None:
+        st.error(f"❌ **No {source} file found.**")
         st.info(f"""
+        **Tried looking for these files:**
+        {chr(10).join([f"• {name}" for name in possible_filenames])}
+        
         **To fix this issue:**
-        1. Make sure you have a file named `{filename}` in the same directory as this script
+        1. Make sure you have one of the above files in the same directory as this script
         2. Check that the filename matches exactly (case-sensitive)
         3. Verify the file is a valid CSV format
         
@@ -105,9 +80,54 @@ def load_data(source, _cache_key=None):
         - For **Index**: 7 columns (date, time, open, high, low, close, volume)
         """)
         return None
-    except Exception as e:
-        st.error(f"❌ Error reading '{filename}': {str(e)}")
+    
+    # Check if we have enough columns
+    num_cols = len(df.columns)
+    if num_cols < 6:
+        st.error(f"❌ '{filename_used}' has insufficient columns (found {num_cols}, need at least 6)")
         return None
+    
+    # Assign column names based on structure
+    if num_cols == 7:  # Index format
+        df.columns = ['date', 'time', 'open', 'high', 'low', 'close', 'volume']
+    elif num_cols == 11:  # Futures format with VIX
+        df.columns = [
+            'date', 'time', 'open', 'high', 'low', 'close', 'volume',
+            'vix_open', 'vix_high', 'vix_low', 'vix_close'
+        ]
+    else:
+        # Generic format - assume first 7 columns are standard
+        df.columns = ['date', 'time', 'open', 'high', 'low', 'close', 'volume'] + [f'col_{i}' for i in range(8, num_cols + 1)]
+    
+    # Create datetime column
+    try:
+        df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str), 
+                                      format='%d-%m-%Y %H:%M:%S', errors='coerce')
+    except:
+        try:
+            df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str), 
+                                          infer_datetime_format=True, errors='coerce')
+        except:
+            st.error(f"❌ Could not parse date/time in '{filename_used}'")
+            return None
+    
+    # Convert numeric columns
+    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # Clean data
+    df = df.dropna(subset=['close', 'datetime'])
+    
+    if df.empty:
+        st.error(f"❌ No valid data found after cleaning '{filename_used}'")
+        return None
+    
+    # Show success message
+    st.success(f"✅ Successfully loaded '{filename_used}' with {len(df):,} records")
+    
+    return df
 
 # Load data based on selected source
 cache_key = f"{data_source}_{hash(data_source)}"
